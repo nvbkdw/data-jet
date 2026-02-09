@@ -1,0 +1,14 @@
+[package]
+name = "data-jet"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "data_jet"
+crate-type = ["cdylib"]
+
+[dependencies]
+ai-dataloader = { path = "rust/ai-dataloader", default-features = false }
+pyo3 = { version = "0.24", features = ["extension-module"] }
+numpy = "0.24"
+rand = "0.8.5"
