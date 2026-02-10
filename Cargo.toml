@@ -12,3 +12,4 @@ ai-dataloader = { path = "rust/ai-dataloader", default-features = false }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 numpy = "0.24"
 rand = "0.8.5"
+tokio = { version = "1", features = ["rt-multi-thread"] }

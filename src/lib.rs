@@ -1,9 +1,21 @@
 use ai_dataloader::collate::Collate;
-use ai_dataloader::indexable::DataLoader;
-use ai_dataloader::{Dataset, GetSample, Len};
+use ai_dataloader::sampler::{BatchSampler, RandomSampler, SequentialSampler, Sampler};
+use ai_dataloader::Len;
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use std::sync::{Arc, OnceLock};
+use tokio::runtime::Runtime;
+
+// ---------------------------------------------------------------------------
+// Global tokio runtime (lazy, mirrors ai-dataloader's THREAD_POOL pattern)
+// ---------------------------------------------------------------------------
+
+static TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn get_runtime() -> &'static Runtime {
+    TOKIO_RUNTIME.get_or_init(|| Runtime::new().expect("failed to create tokio runtime"))
+}
 
 // ---------------------------------------------------------------------------
 // Dataset: holds feature matrix + label vector in contiguous Rust memory
@@ -21,15 +33,43 @@ impl Len for TensorDataset {
     }
 }
 
-impl GetSample for TensorDataset {
-    type Sample = (Vec<f64>, f64);
+// ---------------------------------------------------------------------------
+// Async sample fetching
+// ---------------------------------------------------------------------------
 
-    fn get_sample(&self, index: usize) -> Self::Sample {
-        (self.features[index].clone(), self.labels[index])
+trait AsyncGetSample: Send + Sync {
+    type Sample: Send + 'static;
+    fn get_sample(
+        &self,
+        index: usize,
+    ) -> impl std::future::Future<Output = Self::Sample> + Send;
+}
+
+impl AsyncGetSample for TensorDataset {
+    type Sample = (Vec<f64>, f64);
+    fn get_sample(
+        &self,
+        index: usize,
+    ) -> impl std::future::Future<Output = Self::Sample> + Send {
+        let sample = (self.features[index].clone(), self.labels[index]);
+        async move { sample }
     }
 }
 
-impl Dataset for TensorDataset {}
+async fn fetch_batch_async(dataset: Arc<TensorDataset>, indices: Vec<usize>) -> FlatBatch {
+    let mut handles = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let ds = Arc::clone(&dataset);
+        handles.push(tokio::spawn(async move { ds.get_sample(idx).await }));
+    }
+
+    let mut samples = Vec::with_capacity(handles.len());
+    for handle in handles {
+        samples.push(handle.await.expect("sample fetch task panicked"));
+    }
+
+    FlatCollate.collate(samples)
+}
 
 // ---------------------------------------------------------------------------
 // Collate: batch samples into flat vecs with shape metadata
@@ -178,37 +218,48 @@ impl RustDataLoader {
         }
     }
 
-    /// Build the Rust DataLoader, iterate entirely in Rust, and return
-    /// a Python iterator that yields `(features, labels)` numpy arrays.
-    fn __iter__(&self) -> DataJetIterator {
-        let dataset = TensorDataset {
+    /// Build batch indices via ai-dataloader's samplers, fetch each batch's
+    /// samples in parallel on the tokio runtime, and return a Python iterator
+    /// that yields `(features, labels)` numpy arrays.
+    fn __iter__(&self, py: Python<'_>) -> DataJetIterator {
+        let dataset = Arc::new(TensorDataset {
             features: self.features.clone(),
             labels: self.labels.clone(),
-        };
+        });
+        let batch_size = self.batch_size;
+        let drop_last = self.drop_last;
+        let shuffle = self.shuffle;
+        let dataset_len = dataset.len();
 
-        let batches: Vec<FlatBatch> = if self.shuffle {
-            let mut builder = DataLoader::builder(dataset)
-                .batch_size(self.batch_size)
-                .collate_fn(FlatCollate)
-                .shuffle();
-            if self.drop_last {
-                builder = builder.drop_last();
-            }
-            builder.build().iter().collect()
-        } else {
-            let mut builder = DataLoader::builder(dataset)
-                .batch_size(self.batch_size)
-                .collate_fn(FlatCollate);
-            if self.drop_last {
-                builder = builder.drop_last();
-            }
-            builder.build().iter().collect()
-        };
+        // Release the GIL while doing Rust computation
+        let stored = py.allow_threads(|| {
+            get_runtime().block_on(async {
+                let batch_indices: Vec<Vec<usize>> = if shuffle {
+                    BatchSampler {
+                        sampler: RandomSampler::new(dataset_len),
+                        batch_size,
+                        drop_last,
+                    }
+                    .iter()
+                    .collect()
+                } else {
+                    BatchSampler {
+                        sampler: SequentialSampler::new(dataset_len),
+                        batch_size,
+                        drop_last,
+                    }
+                    .iter()
+                    .collect()
+                };
 
-        let stored = batches
-            .into_iter()
-            .map(|b| (b.features, b.nrows, b.ncols, b.labels))
-            .collect();
+                let mut batches = Vec::with_capacity(batch_indices.len());
+                for indices in batch_indices {
+                    let batch = fetch_batch_async(Arc::clone(&dataset), indices).await;
+                    batches.push((batch.features, batch.nrows, batch.ncols, batch.labels));
+                }
+                batches
+            })
+        });
 
         DataJetIterator {
             batches: stored,
