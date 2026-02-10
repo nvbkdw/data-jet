@@ -1,3 +1,0 @@
-[submodule "rust/ai-dataloader"]
-	path = rust/ai-dataloader
-	url = https://github.com/nvbkdw/ai-dataloader.git

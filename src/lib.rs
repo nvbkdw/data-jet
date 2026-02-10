@@ -1,6 +1,8 @@
-use ai_dataloader::collate::Collate;
-use ai_dataloader::sampler::{BatchSampler, RandomSampler, SequentialSampler, Sampler};
-use ai_dataloader::Len;
+mod collate;
+mod sampler;
+
+use collate::Collate;
+use sampler::{BatchSampler, Len, RandomSampler, Sampler, SequentialSampler};
 use numpy::{PyArray1, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
