@@ -7,8 +7,17 @@ edition = "2021"
 name = "data_jet"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+curvine = ["dep:curvine-client", "dep:curvine-common", "dep:orpc", "dep:bytes"]
+
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
 numpy = "0.24"
 rand = "0.8.5"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+curvine-client = { path = "../curvine/curvine-client", optional = true }
+curvine-common = { path = "../curvine/curvine-common", optional = true }
+orpc = { path = "../curvine/orpc", optional = true }
+bytes = { version = "1", optional = true }
+

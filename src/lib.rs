@@ -1,5 +1,7 @@
 mod collate;
 mod sampler;
+#[cfg(feature = "curvine")]
+mod example;
 
 use collate::Collate;
 use sampler::{BatchSampler, Len, RandomSampler, Sampler, SequentialSampler};
@@ -297,5 +299,9 @@ impl RustDataLoader {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustDataLoader>()?;
+    #[cfg(feature = "curvine")]
+    {
+        m.add_class::<example::CurvineDataLoader>()?;
+    }
     Ok(())
 }
