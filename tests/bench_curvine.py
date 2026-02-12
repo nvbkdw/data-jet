@@ -7,10 +7,11 @@ import numpy as np
 from data_jet import CurvineDataLoader
 
 CONFIG_PATH = "/root/workspace/distributed-cache/curvine-cluster-bench.toml"
-FILE_PATHS = [f"/fuse-bench/{i%100}" for i in range(1000)]
+# FILE_PATHS = [f"/fuse-bench/{i%100}" for i in range(1000)]
+FILE_PATHS = [f"/noetik-training-data-609524518243-us-east-2/dataloader_test/platform_dataset/tile_{i}.safetensors" for i in range(1000)]
 
 
-def bench_curvine_dataloader(batch_size, shuffle, num_epochs=3):
+def bench_curvine_dataloader(batch_size, shuffle, num_epochs=5):
     loader = CurvineDataLoader(
         config_path=CONFIG_PATH,
         file_paths=FILE_PATHS,
@@ -56,5 +57,5 @@ if __name__ == "__main__":
     print("=== CurvineDataLoader Benchmark ===\n")
 
     # bench_curvine_dataloader(batch_size=10, shuffle=False)
-    bench_curvine_dataloader(batch_size=25, shuffle=True)
+    bench_curvine_dataloader(batch_size=40, shuffle=True)
     # bench_curvine_dataloader(batch_size=100, shuffle=False)

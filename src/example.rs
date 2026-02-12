@@ -1,7 +1,8 @@
 use bytes::Bytes;
-use curvine_client::file::CurvineFileSystem;
+use curvine_client::file::{CurvineFileSystem, FsReader};
 use curvine_common::conf::ClusterConf;
 use curvine_common::fs::{Path as CvPath, Reader};
+use curvine_common::state::FileBlocks;
 use curvine_common::FsResult;
 use numpy::ndarray::ArrayView1;
 use numpy::PyArray1;
@@ -9,7 +10,9 @@ use orpc::runtime::{RpcRuntime, Runtime as OrpcRuntime};
 use orpc::sys::DataSlice;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::sampler::{BatchSampler, RandomSampler, Sampler, SequentialSampler};
 
@@ -73,33 +76,61 @@ fn bytes_to_numpy<'py>(
 struct CurvineDataset {
     fs: CurvineFileSystem,
     paths: Vec<CvPath>,
+    /// Original string paths — used as cache keys for block location dedup.
+    path_strings: Vec<String>,
 }
 
 impl CurvineDataset {
-    /// Read one file.  Returns `FileData::ZeroCopy` when the entire file
-    /// comes back in a single chunk (common for files ≤ one RDMA block),
-    /// or `FileData::Copied` after concatenating multiple chunks (which
-    /// immediately drops the per-chunk Bytes and frees RDMA allocations).
-    async fn read_file(&self, index: usize) -> FsResult<FileData> {
+    /// Pre-fetch block locations for all dataset paths, deduplicating by
+    /// path string so repeated files only incur one metadata RPC.
+    async fn prefetch_block_locations(&self) -> Result<Vec<FileBlocks>, String> {
+        let mut cache: HashMap<&str, FileBlocks> = HashMap::new();
+        let mut result = Vec::with_capacity(self.paths.len());
+
+        for (i, path) in self.paths.iter().enumerate() {
+            let key = self.path_strings[i].as_str();
+            let blocks = if let Some(cached) = cache.get(key) {
+                cached.clone()
+            } else {
+                let blocks = self
+                    .fs
+                    .get_block_locations(path)
+                    .await
+                    .map_err(|e| format!("failed to get block locations for {}: {}", key, e))?;
+                cache.insert(key, blocks.clone());
+                blocks
+            };
+            result.push(blocks);
+        }
+
+        Ok(result)
+    }
+
+    /// Read one file using pre-fetched block locations.
+    /// Skips complete() — worker cleans up stale state via connection
+    /// lifecycle, saving one RPC round-trip per file.
+    async fn read_file(
+        &self,
+        index: usize,
+        file_blocks: FileBlocks,
+        _permit: OwnedSemaphorePermit,
+    ) -> FsResult<FileData> {
         let path = &self.paths[index];
-        let mut reader = self.fs.open(path).await?;
+        let mut reader = FsReader::new(path.clone(), self.fs.fs_context(), file_blocks)?;
 
         // First chunk
         let first = if reader.has_remaining() {
             let chunk = reader.async_read(None).await?;
             if chunk.is_empty() {
-                reader.complete().await?;
                 return Ok(FileData::Copied(Vec::new()));
             }
             dataslice_into_bytes(chunk)
         } else {
-            reader.complete().await?;
             return Ok(FileData::Copied(Vec::new()));
         };
 
         // If the file was fully consumed in one chunk, return zero-copy.
         if !reader.has_remaining() {
-            reader.complete().await?;
             return Ok(FileData::ZeroCopy(first));
         }
 
@@ -117,7 +148,7 @@ impl CurvineDataset {
             buf.extend_from_slice(chunk.as_slice());
             // chunk (DataSlice) dropped here → RDMA allocation freed
         }
-        reader.complete().await?;
+
         Ok(FileData::Copied(buf))
     }
 }
@@ -221,13 +252,19 @@ impl CurvineDataLoader {
         let fs = CurvineFileSystem::with_rt(conf, Arc::clone(&rt))
             .map_err(|e| PyIOError::new_err(format!("failed to create filesystem: {}", e)))?;
 
+        let path_strings = file_paths.clone();
+
         let paths: Vec<CvPath> = file_paths
             .into_iter()
             .map(|p| CvPath::new(&p))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| PyValueError::new_err(format!("invalid path: {}", e)))?;
 
-        let dataset = Arc::new(CurvineDataset { fs, paths });
+        let dataset = Arc::new(CurvineDataset {
+            fs,
+            paths,
+            path_strings,
+        });
 
         Ok(Self {
             dataset,
@@ -262,6 +299,12 @@ impl CurvineDataLoader {
 
         let result = py.allow_threads(|| {
             rt.block_on(async {
+                // Pre-fetch block locations, deduplicating by path string.
+                // For repeated files (e.g. i%100) this turns 1000 metadata
+                // RPCs into 100.
+                let all_blocks = dataset.prefetch_block_locations().await?;
+                let all_blocks = Arc::new(all_blocks);
+
                 let batch_indices: Vec<Vec<usize>> = if shuffle {
                     BatchSampler {
                         sampler: RandomSampler::new(dataset_len),
@@ -291,13 +334,12 @@ impl CurvineDataLoader {
                     for (pos_in_batch, &file_idx) in indices.iter().enumerate() {
                         file_to_batch.push((batch_idx, pos_in_batch));
                         let ds = Arc::clone(&dataset);
+                        let blocks = all_blocks[file_idx].clone();
                         let permit = Arc::clone(&sem).acquire_owned().await.unwrap();
                         handles.push(rt.spawn(async move {
-                            let result = ds.read_file(file_idx)
+                            ds.read_file(file_idx, blocks, permit)
                                 .await
-                                .map_err(|e| format!("failed to read file {}: {}", file_idx, e));
-                            drop(permit);
-                            result
+                                .map_err(|e| format!("failed to read file {}: {}", file_idx, e))
                         }));
                     }
                 }
