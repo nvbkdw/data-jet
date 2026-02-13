@@ -14,7 +14,7 @@ uv venv .venv
 source .venv/bin/activate
 uv pip install torch numpy pytest maturin
 # Build the Rust extension into the venv (must rebuild after any Rust change)
-source .venv/bin/activate && maturin develop --release
+source .venv/bin/activate && maturin develop --release --features curvine
 
 # Run all tests
 source .venv/bin/activate && python -m pytest tests/ -v

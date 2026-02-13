@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OwnedSemaphorePermit;
 
+use orpc::common::{LogConf, Logger};
+
 use crate::sampler::{BatchSampler, RandomSampler, Sampler, SequentialSampler};
 
 // ---------------------------------------------------------------------------
@@ -221,7 +223,7 @@ pub struct CurvineDataLoader {
 #[pymethods]
 impl CurvineDataLoader {
     #[new]
-    #[pyo3(signature = (config_path, file_paths, batch_size=1, shuffle=false, drop_last=false, prefetch_size=0))]
+    #[pyo3(signature = (config_path, file_paths, batch_size=1, shuffle=false, drop_last=false, prefetch_size=0, log_level=None, io_threads=0, worker_threads=0))]
     fn new(
         config_path: &str,
         file_paths: Vec<String>,
@@ -229,12 +231,23 @@ impl CurvineDataLoader {
         shuffle: bool,
         drop_last: bool,
         prefetch_size: usize,
+        log_level: Option<&str>,
+        io_threads: usize,
+        worker_threads: usize,
     ) -> PyResult<Self> {
         if file_paths.is_empty() {
             return Err(PyValueError::new_err("file_paths must not be empty"));
         }
         if batch_size == 0 {
             return Err(PyValueError::new_err("batch_size must be > 0"));
+        }
+
+        // Initialize tracing logger (once; subsequent calls are no-ops).
+        if let Some(level) = log_level {
+            Logger::init(LogConf {
+                level: level.to_uppercase(),
+                ..LogConf::default()
+            });
         }
 
         // 0 means "use default": 10 * batch_size
@@ -247,7 +260,16 @@ impl CurvineDataLoader {
         let conf = ClusterConf::from(config_path)
             .map_err(|e| PyValueError::new_err(format!("failed to load config: {}", e)))?;
 
-        let rt = Arc::new(OrpcRuntime::default("data-jet-curvine"));
+        let rt = Arc::new(if io_threads == 0 && worker_threads == 0 {
+            OrpcRuntime::default("data-jet-curvine")
+        } else {
+            let default_threads = 2 * std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2);
+            let io = if io_threads == 0 { 32 } else { io_threads };
+            let workers = if worker_threads == 0 { default_threads.max(4) } else { worker_threads };
+            OrpcRuntime::new("data-jet-curvine", io, workers)
+        });
 
         let fs = CurvineFileSystem::with_rt(conf, Arc::clone(&rt))
             .map_err(|e| PyIOError::new_err(format!("failed to create filesystem: {}", e)))?;

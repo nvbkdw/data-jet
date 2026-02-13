@@ -17,6 +17,9 @@ def bench_curvine_dataloader(batch_size, shuffle, num_epochs=5):
         file_paths=FILE_PATHS,
         batch_size=batch_size,
         shuffle=shuffle,
+        log_level="INFO",
+        io_threads=32,
+        worker_threads=4,
     )
 
     print(f"batch_size={batch_size}, shuffle={shuffle}, files={len(FILE_PATHS)}, epochs={num_epochs}")
@@ -57,5 +60,5 @@ if __name__ == "__main__":
     print("=== CurvineDataLoader Benchmark ===\n")
 
     # bench_curvine_dataloader(batch_size=10, shuffle=False)
-    bench_curvine_dataloader(batch_size=40, shuffle=True)
+    bench_curvine_dataloader(batch_size=64, shuffle=True)
     # bench_curvine_dataloader(batch_size=100, shuffle=False)

@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [features]
 default = []
 curvine = ["dep:curvine-client", "dep:curvine-common", "dep:orpc", "dep:bytes"]
+rdma = ["curvine", "curvine-client/rdma", "curvine-common/rdma"]
 
 [dependencies]
 pyo3 = { version = "0.24", features = ["extension-module"] }
